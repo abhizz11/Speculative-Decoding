@@ -1,0 +1,11 @@
+# Environments
+.conda/
+env/
+venv/
+
+# Caches
+__pycache__/
+.cache/
+
+# Secrets
+.env
