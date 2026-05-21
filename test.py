@@ -19,7 +19,7 @@ small_model = AutoModelForCausalLM.from_pretrained(small, device_map="auto", dty
 big_tokenizer = AutoTokenizer.from_pretrained(big, device_map="auto")
 big_model = AutoModelForCausalLM.from_pretrained(big, device_map="auto", dtype=torch.bfloat16)
 
-# Normal inference for evaluate the increase in speed
+# Normal inference to evaluate the increase in speed
 def normal_inference(big_model, big_tokenizer, prompt, max_new_tokens=50):
     inputs = big_tokenizer(prompt, return_tensors="pt").to(device)
     outputs = big_model.generate(inputs['input_ids'], 
