@@ -1,3 +1,5 @@
+# Speculative Decoding code by following a website
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
 import time

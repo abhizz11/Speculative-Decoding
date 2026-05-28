@@ -1,3 +1,5 @@
+# Speculative Decodin Algorithm but this one gave me gibberish output
+
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed

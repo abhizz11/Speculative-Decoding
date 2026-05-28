@@ -1,3 +1,4 @@
+# Actual Speculative Decoding Algorithm with no gibberish output
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
 import time
