@@ -1,4 +1,4 @@
-# Using HuggingFace Universal Assisted Generation to emulate something like speculative decoding
+# Using HuggingFace Universal Assisted Generation to emulate something like speculative decoding, manual
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
@@ -117,6 +117,9 @@ def speculative_decoding(prompt, target_model, target_tokenizer, assistant_model
             break
     
     return current_text, accepted_texts, len(accepted_texts)
+
+
+def uag()
 
 
 def measure_latency(func, *args, **kwargs):
