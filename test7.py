@@ -9,7 +9,7 @@ set_seed(42)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(device)
 
-# Using heterogeneous models as requested (Gemma and Vicuna)
+# Using heterogeneous models
 small_model_id = "double7/vicuna-68m" 
 large_model_id = "google/gemma-2-2b-it"
 
@@ -60,9 +60,14 @@ for sid in sample_ids:
     print(f"  '{tok}' (small:{sid}) → '{large_tok}' (large:{large_id})")
 
 
-# ==========================================
-# Inference Functions
-# ==========================================
+def safe_decode(tokenizer, token_ids):
+    # decode without skipping specials
+    text = tokenizer.decode(token_ids, skip_special_tokens=False)
+
+    for special in [tokenizer.bos_token, tokenizer.eos_token, tokenizer.pad_token]:
+        if special:
+            text = text.replace(special, "")
+    return text
 
 def normal_inference(model, tokenizer, prompt, max_new_tokens=30):
     inputs = tokenizer(prompt, return_tensors='pt').to(device)
@@ -115,7 +120,7 @@ def uag_tli_speculative_decoding_inference(large_model, small_model, large_token
         small_generated = small_inputs["input_ids"]
         small_old_len = small_generated.shape[1]
 
-        #  1: Drafting (Masked to Intersection)
+        #  Drafting (Masked to Intersection)
         draft_outputs = small_model.generate(
             input_ids=small_generated,
             max_new_tokens=gamma,
@@ -138,7 +143,7 @@ def uag_tli_speculative_decoding_inference(large_model, small_model, large_token
             for score in draft_outputs.scores
         ]
 
-        #  2: Translation to Target Space
+        #  Translation to Target Space
         mapped_draft_tokens = torch.tensor(
             [intersection_mapping[t.item()] for t in draft_tokens], 
             device=device
@@ -149,7 +154,7 @@ def uag_tli_speculative_decoding_inference(large_model, small_model, large_token
             dim=1
         )
 
-        #  3: Verification
+        #  Verification
         with torch.no_grad():
             target_outputs = large_model(input_ids=candidate_ids)
 
@@ -157,7 +162,7 @@ def uag_tli_speculative_decoding_inference(large_model, small_model, large_token
         rejected = False
         reject_index = None
 
-        #  4: Rejection Sampling
+        #  Rejection Sampling
         for i, small_token_id in enumerate(draft_tokens):
             small_token_id = small_token_id.item()
             large_token_id = mapped_draft_tokens[i].item()
@@ -189,7 +194,7 @@ def uag_tli_speculative_decoding_inference(large_model, small_model, large_token
             generated = torch.cat([generated, accepted_tensor], dim=1)
             
             # Sync text context for the drafter's next loop
-            added_text = large_tokenizer.decode(accepted_tensor[0], skip_special_tokens=True)
+            added_text = safe_decode(large_tokenizer, accepted_tensor[0])
             current_text += added_text
 
         if generated.shape[1] >= target_len:
@@ -219,8 +224,7 @@ def uag_tli_speculative_decoding_inference(large_model, small_model, large_token
             ).view(1, 1)
 
             generated = torch.cat([generated, next_token], dim=1)
-            current_text += large_tokenizer.decode(next_token[0], skip_special_tokens=True)
-
+            current_text += safe_decode(large_tokenizer, next_token[0])
         else:
             # If all accepted, sample one bonus token
             next_logits = target_outputs.logits[0, -1, :]
