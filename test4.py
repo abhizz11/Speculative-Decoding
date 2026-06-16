@@ -119,8 +119,6 @@ def speculative_decoding(prompt, target_model, target_tokenizer, assistant_model
     return current_text, accepted_texts, len(accepted_texts)
 
 
-def uag()
-
 
 def measure_latency(func, *args, **kwargs):
     """Measures execution time of a function, synchronizing CUDA if available."""
