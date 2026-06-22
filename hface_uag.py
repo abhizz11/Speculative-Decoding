@@ -17,7 +17,6 @@ small_model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2-large"
 
 large_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
 large_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B").to(device)
-
 max_new_tokens = 30
 
 
