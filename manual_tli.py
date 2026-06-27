@@ -112,135 +112,135 @@ def uag_tli_speculative_decoding_inference(large_model, small_model, large_token
     accepted_tokens = 0
     total_draft_tokens = 0
 
-    while generated.shape[1] < target_len:
-        old_len = generated.shape[1]
+    with torch.no_grad():
+        while generated.shape[1] < target_len:
+            old_len = generated.shape[1]
 
-        # Tokenize the current synced text for the drafter
-        small_inputs = small_tokenizer(current_text, return_tensors="pt").to(device)
-        small_generated = small_inputs["input_ids"]
-        small_old_len = small_generated.shape[1]
+            # Tokenize the current synced text for the drafter
+            small_inputs = small_tokenizer(current_text, return_tensors="pt").to(device)
+            small_generated = small_inputs["input_ids"]
+            small_old_len = small_generated.shape[1]
 
-        #  Drafting (Masked to Intersection)
-        draft_outputs = small_model.generate(
-            input_ids=small_generated,
-            max_new_tokens=gamma,
-            pad_token_id=small_tokenizer.eos_token_id,
-            return_dict_in_generate=True,
-            output_scores=True,
-            logits_processor=logits_processor
-        )
+            #  Drafting (Masked to Intersection)
+            draft_outputs = small_model.generate(
+                input_ids=small_generated,
+                max_new_tokens=gamma,
+                pad_token_id=small_tokenizer.eos_token_id,
+                return_dict_in_generate=True,
+                output_scores=True,
+                logits_processor=logits_processor
+            )
 
-        draft_sequence = draft_outputs.sequences[0]
-        draft_tokens = draft_sequence[small_old_len:]
+            draft_sequence = draft_outputs.sequences[0]
+            draft_tokens = draft_sequence[small_old_len:]
 
-        if len(draft_tokens) == 0:
-            break
+            if len(draft_tokens) == 0:
+                break
 
-        total_draft_tokens += len(draft_tokens)
+            total_draft_tokens += len(draft_tokens)
 
-        q_distributions = [
-            torch.softmax(score[0], dim=-1)
-            for score in draft_outputs.scores
-        ]
+            q_distributions = [
+                torch.softmax(score[0], dim=-1)
+                for score in draft_outputs.scores
+            ]
 
-        #  Translation to Target Space
-        mapped_draft_tokens = torch.tensor(
-            [intersection_mapping[t.item()] for t in draft_tokens], 
-            device=device
-        )
+            #  Translation to Target Space
+            mapped_draft_tokens = torch.tensor(
+                [intersection_mapping[t.item()] for t in draft_tokens], 
+                device=device
+            )
 
-        candidate_ids = torch.cat(
-            [generated, mapped_draft_tokens.unsqueeze(0)],
-            dim=1
-        )
+            candidate_ids = torch.cat(
+                [generated, mapped_draft_tokens.unsqueeze(0)],
+                dim=1
+            )
 
-        #  Verification
-        with torch.no_grad():
+            #  Verification
             target_outputs = large_model(input_ids=candidate_ids)
 
-        accepted_list = []
-        rejected = False
-        reject_index = None
+            accepted_list = []
+            rejected = False
+            reject_index = None
 
-        #  Rejection Sampling
-        for i, small_token_id in enumerate(draft_tokens):
-            small_token_id = small_token_id.item()
-            large_token_id = mapped_draft_tokens[i].item()
-            
-            q_dist = q_distributions[i]
-            q_prob = q_dist[small_token_id].item()
+            #  Rejection Sampling
+            for i, small_token_id in enumerate(draft_tokens):
+                small_token_id = small_token_id.item()
+                large_token_id = mapped_draft_tokens[i].item()
+                
+                q_dist = q_distributions[i]
+                q_prob = q_dist[small_token_id].item()
 
-            target_logits = target_outputs.logits[0, old_len + i, :]
-            p_dist = torch.softmax(target_logits, dim=-1)
-            p_prob = p_dist[large_token_id].item()
+                target_logits = target_outputs.logits[0, old_len + i - 1, :]
+                p_dist = torch.softmax(target_logits, dim=-1)
+                p_prob = p_dist[large_token_id].item()
 
-            if q_prob > 0:
-                accept_prob = min(1.0, p_prob / q_prob)
-            else:
-                accept_prob = 1.0
+                if q_prob > 0:
+                    accept_prob = min(1.0, p_prob / q_prob)
+                else:
+                    accept_prob = 1.0
 
-            random_number = torch.rand(1).item()
+                random_number = torch.rand(1).item()
 
-            if random_number <= accept_prob:
-                accepted_list.append(torch.tensor([[large_token_id]], device=device))
-                accepted_tokens += 1
-            else:
-                rejected = True
-                reject_index = i
+                if random_number <= accept_prob:
+                    accepted_list.append(torch.tensor([[large_token_id]], device=device))
+                    accepted_tokens += 1
+                else:
+                    rejected = True
+                    reject_index = i
+                    break
+
+            if len(accepted_list) > 0:
+                accepted_tensor = torch.cat(accepted_list, dim=1)
+                generated = torch.cat([generated, accepted_tensor], dim=1)
+                
+                # Sync text context for the drafter's next loop
+                added_text = safe_decode(large_tokenizer, accepted_tensor[0])
+                current_text += added_text
+
+            if generated.shape[1] >= target_len:
                 break
 
-        if len(accepted_list) > 0:
-            accepted_tensor = torch.cat(accepted_list, dim=1)
-            generated = torch.cat([generated, accepted_tensor], dim=1)
-            
-            # Sync text context for the drafter's next loop
-            added_text = safe_decode(large_tokenizer, accepted_tensor[0])
-            current_text += added_text
+            # Resampling / Bonus Token
+            if rejected:
+                q_dist = q_distributions[reject_index]
+                target_logits = target_outputs.logits[0, old_len + reject_index - 1, :]
+                p_dist = torch.softmax(target_logits, dim=-1)
 
-        if generated.shape[1] >= target_len:
-            break
+                # Map the drafter's distribution into the target's vocabulary space for subtraction
+                mapped_q_dist = torch.zeros_like(p_dist)
+                for s_id, l_id in intersection_mapping.items():
+                    mapped_q_dist[l_id] = q_dist[s_id]
 
-        # Resampling / Bonus Token
-        if rejected:
-            q_dist = q_distributions[reject_index]
-            target_logits = target_outputs.logits[0, old_len + reject_index, :]
-            p_dist = torch.softmax(target_logits, dim=-1)
+                adjusted_dist = torch.clamp(p_dist - mapped_q_dist, min=0)
 
-            # Map the drafter's distribution into the target's vocabulary space for subtraction
-            mapped_q_dist = torch.zeros_like(p_dist)
-            for s_id, l_id in intersection_mapping.items():
-                mapped_q_dist[l_id] = q_dist[s_id]
+                if adjusted_dist.sum().item() == 0:
+                    adjusted_dist = p_dist
+                else:
+                    adjusted_dist = adjusted_dist / adjusted_dist.sum()
 
-            adjusted_dist = torch.clamp(p_dist - mapped_q_dist, min=0)
+                next_token = torch.multinomial(
+                    adjusted_dist,
+                    num_samples=1
+                ).view(1, 1)
 
-            if adjusted_dist.sum().item() == 0:
-                adjusted_dist = p_dist
+                generated = torch.cat([generated, next_token], dim=1)
+                current_text += safe_decode(large_tokenizer, next_token[0])
             else:
-                adjusted_dist = adjusted_dist / adjusted_dist.sum()
+                # If all accepted, sample one bonus token
+                next_logits = target_outputs.logits[0, -1, :]
+                next_dist = torch.softmax(next_logits, dim=-1)
 
-            next_token = torch.multinomial(
-                adjusted_dist,
-                num_samples=1
-            ).view(1, 1)
+                next_token = torch.multinomial(
+                    next_dist,
+                    num_samples=1
+                ).view(1, 1)
 
-            generated = torch.cat([generated, next_token], dim=1)
-            current_text += safe_decode(large_tokenizer, next_token[0])
-        else:
-            # If all accepted, sample one bonus token
-            next_logits = target_outputs.logits[0, -1, :]
-            next_dist = torch.softmax(next_logits, dim=-1)
+                generated = torch.cat([generated, next_token], dim=1)
+                current_text += large_tokenizer.decode(next_token[0], skip_special_tokens=True)
 
-            next_token = torch.multinomial(
-                next_dist,
-                num_samples=1
-            ).view(1, 1)
-
-            generated = torch.cat([generated, next_token], dim=1)
-            current_text += large_tokenizer.decode(next_token[0], skip_special_tokens=True)
-
-        if large_tokenizer.eos_token_id is not None:
-            if generated[0, -1].item() == large_tokenizer.eos_token_id:
-                break
+            if large_tokenizer.eos_token_id is not None:
+                if generated[0, -1].item() == large_tokenizer.eos_token_id:
+                    break
 
     final_ids = generated[0, :target_len]
     final_text = large_tokenizer.decode(final_ids, skip_special_tokens=True)
@@ -267,7 +267,7 @@ def measure_latency(func, *args, **kwargs):
     return latency, result
 
 prompt = "Once upon a time, there was a little girl named Alice who lived in a small village."
-max_new_tokens = 50
+max_new_tokens = 64
 
 # Measure Normal Inference
 normal_latency, normal_outputs = measure_latency(
@@ -288,7 +288,7 @@ sd_latency, sd_outputs = measure_latency(
     prompt, 
     device, 
     max_new_tokens, 
-    gamma=2
+    gamma=4
 )
 
 
@@ -300,3 +300,6 @@ print(f"Speculative Decoding Latency: {sd_latency:.4f} seconds")
 print(sd_outputs[0])
 print(f"Speedup: {normal_latency / sd_latency:.2f}x")
 print("-" * 50)
+print("Generated Tokens: ", sd_outputs[2])
+print("Accepted drafts: ", sd_outputs[1])
+print("Acceptance rate: ", sd_outputs[3])
