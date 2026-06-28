@@ -18,7 +18,7 @@ large_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B").to
 
 def normal_inference(model, tokenizer, prompt, max_new_tokens=30):
     inputs = tokenizer(prompt, return_tensors='pt').to(device)
-    outputs = model.generate(inputs['input_ids'], max_new_tokens=max_new_tokens, attention_mask=inputs["attention_mask"],  pad_token_id=tokenizer.eos_token_id, return_dict_in_generate=True, output_scores=True,)
+    outputs = model.generate(inputs['input_ids'], max_new_tokens=max_new_tokens, attention_mask=inputs["attention_mask"],  pad_token_id=tokenizer.eos_token_id, return_dict_in_generate=True, output_scores=True, temperature=0.8, top_p=0.9)
                                 # do_sample=True,        # enable sampling
                                 # temperature=0.8,       # control randomness
                                 # top_p=0.9)             # nucleus sampling
