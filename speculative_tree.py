@@ -1,6 +1,3 @@
-# Speculative Sampling based on Tree Sampling
-# Took References: https://github.com/bassrehab/speculative-decoding/blob/main/tree_speculation.py 
-
 import torch
 import torch.nn.functional as F
 import time
@@ -308,6 +305,19 @@ def tree_speculative_decode(draft_model, target_model, tokenizer, prompt, config
         candidate_tokens, candidate_probs, tree_mask = tree.build_tree(
             draft_model, all_token_ids, None, device
         )
+        paths = tree.get_paths()
+        print(f"\n[Iteration {metrics.total_iterations}]")
+        for i, path in enumerate(paths):
+            # Extract token IDs for this path
+            path_tokens = [node.token_id for node in path]
+            # Decode to readable text
+            decoded_text = tokenizer.decode(path_tokens)
+            # Grab probabilities for debugging
+            probs = [round(node.prob, 3) for node in path]
+            
+            print(f"  Path {i}: {path_tokens}")
+            print(f"  Text   : '{decoded_text}'")
+            print(f"  Probs  : {probs}\n")
 
         metrics.total_candidates_evaluated += len(candidate_tokens)
 
