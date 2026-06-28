@@ -10,4 +10,5 @@ __pycache__/
 # Secrets
 .env
 SD.ipynb
+SD-checkpoint.ipynb
 tree.py
