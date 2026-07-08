@@ -1,3 +1,5 @@
+# References taken from: https://github.com/bassrehab/speculative-decoding/blob/main/tree_speculation.py
+
 import torch
 import torch.nn.functional as F
 import time
