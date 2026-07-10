@@ -23,7 +23,7 @@ target_model.eval()
 ssm.eval()
 # Configuration
 prompt = "Once upon a time there was a little girl named Alice "
-k_config = [2, 2, 2, 1] # Number of tokens in each branch
+k_config = [2, 2, 1] # Number of tokens in each branch
 
 # This function builds the draft tree
 def build_draft_tree(prefix_input_ids, ssm, k_config, device):
@@ -230,7 +230,9 @@ def greedy_step(
         debug=debug,
     )
 
-    return accepted_tokens, accepted_nodes
+    # Returning token_tree length to calculate total rejections
+    total_tree_tokens = len(token_tree) - prompt_length
+    return accepted_tokens, accepted_nodes, total_tree_tokens
 
 # Main function that generates the tree 
 def fixed_tree_speculative_generate_greedy(
@@ -251,6 +253,14 @@ def fixed_tree_speculative_generate_greedy(
     all_new_tokens = []
 
     iteration = 0
+    # Metric tracking variables
+    metrics = {
+        "total_draft_tokens_evaluated": 0,
+        "total_draft_tokens_accepted": 0,
+        "total_bonus_tokens": 0,
+        "accepted_lengths_per_step": [],
+        "total_iterations": 0
+    }
 
     if device == "cuda": # For latency
         torch.cuda.synchronize()
@@ -272,7 +282,7 @@ def fixed_tree_speculative_generate_greedy(
             print("Remaining tokens:", remaining_tokens)
             print("Max accept this iteration:", max_accept_this_iter)
 
-        accepted_tokens, accepted_nodes = greedy_step(
+        accepted_tokens, accepted_nodes, total_tree_tokens = greedy_step(
             current_input_ids=generated_ids,
             ssm=ssm,
             target_model=target_model,
@@ -291,6 +301,15 @@ def fixed_tree_speculative_generate_greedy(
 
         # Clip just in case
         accepted_tokens = accepted_tokens[:remaining_tokens]
+
+        # Track metric details
+        num_accepted_draft = len(accepted_nodes)
+        num_bonus = len(accepted_tokens) - num_accepted_draft
+        
+        metrics["total_draft_tokens_evaluated"] += total_tree_tokens
+        metrics["total_draft_tokens_accepted"] += num_accepted_draft
+        metrics["total_bonus_tokens"] += num_bonus
+        metrics["accepted_lengths_per_step"].append(num_accepted_draft)
 
         # Append accepted tokens to sequence
         new_token_tensor = torch.tensor(
@@ -319,6 +338,12 @@ def fixed_tree_speculative_generate_greedy(
     end = time.perf_counter()
 
     final_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+    metrics["total_iterations"] = iteration
+    metrics["latency"] = end - start
+    metrics["num_new_tokens"] = len(all_new_tokens)
+    metrics["text"] = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+    metrics["new_text"] = tokenizer.decode(all_new_tokens, skip_special_tokens=True)
+
 
     return {
         "generated_ids": generated_ids,
@@ -327,11 +352,35 @@ def fixed_tree_speculative_generate_greedy(
         "new_text": tokenizer.decode(all_new_tokens, skip_special_tokens=True),
         "latency": end - start,
         "num_new_tokens": len(all_new_tokens),
-    }
+    }, metrics
+
+# Comparison against normal generation
+def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device):
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    
+    if device == "cuda":
+        torch.cuda.synchronize()
+    start = time.perf_counter()
+    
+    with torch.no_grad():
+        output_ids = target_model.generate(
+            input_ids, 
+            max_new_tokens=max_new_tokens, 
+            do_sample=False, # Greedy matching baseline
+            use_cache=True
+        )
+        
+    if device == "cuda":
+        torch.cuda.synchronize()
+    end = time.perf_counter()
+    
+    new_tokens = output_ids[0, input_ids.shape[1]:].tolist()
+    latency = end - start
+    return latency, len(new_tokens)
 
 max_new_tokens = 30
 
-result = fixed_tree_speculative_generate_greedy(
+result, spec_result = fixed_tree_speculative_generate_greedy(
     prompt=prompt,
     tokenizer=tokenizer,
     ssm=ssm,
@@ -343,12 +392,40 @@ result = fixed_tree_speculative_generate_greedy(
     debug=True,  
 )
 
+# Normal baseline
+normal_latency, normal_tokens = run_normal_baseline(
+    prompt=prompt, tokenizer=tokenizer, target_model=target_model, max_new_tokens=max_new_tokens, device=device
+)
+
+# --- Print Final Metrics Report ---
 print("\n" + "=" * 80)
-print("FINAL RESULT")
+print("PERFORMANCE & METRICS REPORT")
 print("=" * 80)
 print("Generated new token ids:", result["new_token_ids"])
-print("Generated new text:", repr(result["new_text"]))
 print("Full text:", repr(result["text"]))
-print("Num new tokens:", result["num_new_tokens"])
-print("Latency:", result["latency"])
-print("Tokens/sec:", result["num_new_tokens"] / result["latency"])
+print(f"Total Tokens Generated:         {spec_result['num_new_tokens']}")
+print(f"Total Spec Steps (Iterations):  {spec_result['total_iterations']}")
+print(f"Total Draft Tokens Accepted:    {spec_result['total_draft_tokens_accepted']}")
+print(f"Total Target Bonus Tokens:      {spec_result['total_bonus_tokens']}")
+print(f"Total Tree Tokens Rejected:     {spec_result['total_draft_tokens_evaluated'] - spec_result['total_draft_tokens_accepted']}")
+
+# Acceptance Rate Interpretations
+path_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / (spec_result['total_iterations'] * len(k_config))) * 100
+tree_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / spec_result['total_draft_tokens_evaluated']) * 100
+
+print(f"Draft Acceptance Rate (Path):   {path_acceptance_rate:.2f}% (Accepted vs max potential path depth)")
+print(f"Draft Acceptance Rate (Tree):   {tree_acceptance_rate:.2f}% (Accepted vs total structural tree nodes generated)")
+print(f"Average Accepted Per Step:      {sum(spec_result['accepted_lengths_per_step']) / spec_result['total_iterations']:.2f} tokens")
+
+print("-" * 80)
+print("SPEED & LATENCY COMPARISON")
+print("-" * 80)
+spec_throughput = spec_result['num_new_tokens'] / spec_result['latency']
+normal_throughput = normal_tokens / normal_latency
+
+print(f"Speculative Tree Latency:       {spec_result['latency']:.4f} seconds")
+print(f"Speculative Tree Throughput:    {spec_throughput:.2f} tokens/sec")
+print(f"Normal Target Model Latency:    {normal_latency:.4f} seconds")
+print(f"Normal Target Model Throughput: {normal_throughput:.2f} tokens/sec")
+print(f"Speedup Factor:                 {normal_latency / spec_result['latency']:.2f}x (Values < 1.0x mean slower)")
+print("=" * 80)
