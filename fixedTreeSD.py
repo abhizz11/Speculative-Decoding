@@ -376,9 +376,9 @@ def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device)
     
     new_tokens = output_ids[0, input_ids.shape[1]:].tolist()
     latency = end - start
-    return latency, len(new_tokens)
+    return latency, len(new_tokens), tokenizer.decode(output_ids, skip_special_tokens=True)
 
-max_new_tokens = 120
+max_new_tokens = 500
 
 result, spec_result = fixed_tree_speculative_generate_greedy(
     prompt=prompt,
@@ -393,7 +393,7 @@ result, spec_result = fixed_tree_speculative_generate_greedy(
 )
 
 # Normal baseline
-normal_latency, normal_tokens = run_normal_baseline(
+normal_latency, normal_tokens, normal_text = run_normal_baseline(
     prompt=prompt, tokenizer=tokenizer, target_model=target_model, max_new_tokens=max_new_tokens, device=device
 )
 
@@ -403,6 +403,8 @@ print("PERFORMANCE & METRICS REPORT")
 print("=" * 80)
 print("Generated new token ids:", result["new_token_ids"])
 print("Full text:", repr(result["text"]))
+print("=" * 80)
+print("Normal baseline text: ", normal_text )
 print(f"Total Tokens Generated:         {spec_result['num_new_tokens']}")
 print(f"Total Spec Steps (Iterations):  {spec_result['total_iterations']}")
 print(f"Total Draft Tokens Accepted:    {spec_result['total_draft_tokens_accepted']}")
