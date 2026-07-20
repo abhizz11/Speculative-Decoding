@@ -15,3 +15,5 @@ SD-checkpoint.ipynb
 tree.py
 .ipynb_checkpoints/fixedTreeSD-checkpoint.ipynb
 SpecInfer.ipynb
+speculative_tree.py
+
