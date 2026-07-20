@@ -33,7 +33,6 @@ This repository explores several draft-and-verify strategies, ranging from a man
 - [Research Directions](#research-directions)
 - [References](#references)
 - [Acknowledgments](#acknowledgments)
-- [License](#license)
 
 ## Background
 
@@ -660,7 +659,7 @@ Potential next steps include:
 
 ## Acknowledgments
 
-This repository is being developed as a university summer research project under the supervision of **[Professor Name]** at **[University Name]**.
+This repository is being developed as a university summer research project under the supervision of **Dr. Yu Zhang** at **Fisk University**.
 
 The project builds on the speculative decoding research literature and the assisted-generation functionality available in Hugging Face Transformers.
 
