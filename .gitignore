@@ -6,6 +6,7 @@ venv/
 # Caches
 __pycache__/
 .cache/
+.ipynb_checkpoints/
 
 # Secrets
 .env
@@ -13,3 +14,4 @@ SD.ipynb
 SD-checkpoint.ipynb
 tree.py
 .ipynb_checkpoints/fixedTreeSD-checkpoint.ipynb
+SpecInfer.ipynb

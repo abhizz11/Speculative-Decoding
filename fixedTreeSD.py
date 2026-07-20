@@ -8,11 +8,11 @@ from collections import defaultdict
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Load draft model and tokenizer
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-ssm = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B").to(device)
+tokenizer = AutoTokenizer.from_pretrained("distilbert/distilgpt2")
+ssm = AutoModelForCausalLM.from_pretrained("distilbert/distilgpt2").to(device)
 dtype = torch.float16
 target_model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-3.2-3B",
+    "openai-community/gpt2-large",
     torch_dtype = dtype,
     attn_implementation="sdpa"
 ).to(device)
@@ -23,7 +23,7 @@ target_model.eval()
 ssm.eval()
 # Configuration
 prompt = "Once upon a time there was a little girl named Alice "
-k_config = [2, 2, 1] # Number of tokens in each branch
+k_config = [1, 2, 2] # Number of tokens in each branch
 
 # This function builds the draft tree
 def build_draft_tree(prefix_input_ids, ssm, k_config, device):
@@ -378,7 +378,7 @@ def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device)
     latency = end - start
     return latency, len(new_tokens)
 
-max_new_tokens = 30
+max_new_tokens = 120
 
 result, spec_result = fixed_tree_speculative_generate_greedy(
     prompt=prompt,
