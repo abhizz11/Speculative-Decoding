@@ -1,18 +1,18 @@
 import torch
 import time
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, DynamicCache
 from transformers import AttentionInterface, AttentionMaskInterface
 from collections import defaultdict
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Load draft model and tokenizer
-tokenizer = AutoTokenizer.from_pretrained("distilbert/distilgpt2")
-ssm = AutoModelForCausalLM.from_pretrained("distilbert/distilgpt2").to(device)
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+ssm = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B").to(device)
 dtype = torch.float16
 target_model = AutoModelForCausalLM.from_pretrained(
-    "openai-community/gpt2-large",
+   "meta-llama/Llama-3.2-3B",
     torch_dtype = dtype,
     attn_implementation="sdpa"
 ).to(device)
@@ -21,12 +21,13 @@ target_model = AutoModelForCausalLM.from_pretrained(
 
 target_model.eval()
 ssm.eval()
+
 # Configuration
 prompt = "Once upon a time there was a little girl named Alice "
-k_config = [1, 2, 2] # Number of tokens in each branch
+k_config = [3, 2, 1] # Number of tokens in each branch
 
 # This function builds the draft tree
-def build_draft_tree(prefix_input_ids, ssm, k_config, device):
+def build_draft_tree(prefix_input_ids, ssm, k_config, device, draft_cache):
     prompt_len = prefix_input_ids.shape[1]
 
     token_tree = prefix_input_ids[0].tolist()
@@ -34,72 +35,95 @@ def build_draft_tree(prefix_input_ids, ssm, k_config, device):
 
     # For prompt tokens
     probs_array = [1.0] * prompt_len # Prompts have a probability of one
+    frontier_cache = draft_cache # Pre-cached tokens up until the last one
+    frontier_tokens = prefix_input_ids[:, -1:] # Final token awaiting to be processed
 
-    active_nodes = [(prefix_input_ids, prompt_len - 1)] # Current active nodes we work on
+
+    active_nodes = [prompt_len - 1] # Current active nodes we work on
 
     ssm_dists_by_parent = {} # Not used for now but stores distributions
 
-    for k in k_config:
-        next_active_nodes = [] # Storing tokens for next iteration
+    for depth, k in enumerate(k_config):
+        with torch.inference_mode():
+            outputs = ssm(
+                input_ids = frontier_tokens,
+                past_key_values = frontier_cache,
+                use_cache = True,
+            )
+        
+        next_token_logits = outputs.logits[:, -1, :] # The next token is in the last row
+        next_token_probs = F.softmax(next_token_logits.float(), dim=-1) # Probabilities for later
+        top_k_probs, top_k_indices = torch.topk(next_token_probs, k, dim=-1) # Extract top k tokens acc to the config
 
-        for seq_tensor, parent_idx in active_nodes:
-            with torch.no_grad():
-                outputs = ssm(seq_tensor) # Forward pass
-            
-            next_token_logits = outputs.logits[0, -1, :] # Extract last logits
-            next_token_probs = F.softmax(next_token_logits.float(), dim = -1) # Extract probabiltities
+        next_active_nodes = []
+        for row, parent_idx in enumerate(active_nodes):
+            ssm_dists_by_parent[parent_idx] = next_token_probs[row].detach()
 
-            ssm_dists_by_parent[parent_idx] = next_token_probs.detach() # Store distribution
-
-            top_k_probs, top_k_indices = torch.topk(next_token_probs, k) # Section top k tokens' indicies and probabiltities
-
-            for prob, token_id in zip(top_k_probs, top_k_indices):
+            for prob, token_id in zip(top_k_probs[row], top_k_indices[row]):
                 token_val = token_id.item()
                 prob_val = prob.item()
 
                 token_tree.append(token_val) # Contains all the tokens
-                parent_array.append(parent_idx) # Parent for attention mask later
+                parent_array.append(parent_idx) # Parent for attention mask
+
                 probs_array.append(prob_val) # Probability array
+                new_node_idx = len(token_tree) - 1
 
-                new_node_idx = len(token_tree) - 1 # Next node we are processing is at the end of the token tree
-                new_token = seq_tensor.new_tensor([[token_val]])
-                new_seq_tensor = torch.cat([seq_tensor, new_token], dim = 1) # combine new token and the tensor
-
-                next_active_nodes.append((new_seq_tensor, new_node_idx))
-
-        active_nodes = next_active_nodes # Replace active nodes
+                next_active_nodes.append(new_node_idx)
+        
+        # Each branch needs its own copy of the KV state before the next depth. 
+        if depth < len(k_config) - 1:
+            frontier_cache = DynamicCache([
+                (
+                    layer.keys.repeat_interleave(k, dim=0),
+                    layer.values.repeat_interleave(k, dim=0),
+                )
+                for layer in outputs.past_key_values.layers
+            ])
+            frontier_tokens = top_k_indices.reshape(-1, 1)
+            active_nodes = next_active_nodes
     
     return token_tree, parent_array, probs_array, prompt_len, ssm_dists_by_parent
 
+
 # Attention mask for the tree, since we cannot use normal causal attention
-def build_full_tree_attention_mask(parent_array, prompt_len, device, dtype=dtype):
-    total_len = len(parent_array) 
+def build_full_tree_attention_mask(parent_array, prompt_len, past_len, device, dtype=dtype):
+    tree_len = len(parent_array) - prompt_len
+    query_len = 1 + tree_len # pending token + flattened draft tree
+
+
+    # dim0 = batch size which is 1
+    # dim1 = 1 allows Pytorch to broadcast this mask across all heads
+    # dim2 = queries, represents tokens actively passing through the model rn
+    # dim3 = keys, represents total memory space, older kv cache + curr tokens
 
     mask = torch.full(
-        (total_len, total_len),
-        float('-inf'),
+        (1, 1, query_len, past_len + query_len),
+        torch.finfo(dtype).min,
         device=device,
         dtype=dtype
-    ) # Create a tensor with -inf values
+    )
 
-    causal = torch.tril(
-        torch.ones(prompt_len, prompt_len, device=device, dtype=torch.bool)
-    ) # Create a lower triangular matrix for the prompt, similar to causal attention
-
-    mask[:prompt_len, :prompt_len] = torch.where(
-        causal,
-        torch.tensor(0.0, device=device, dtype=dtype),
-        torch.tensor(float('-inf'), device=device, dtype=dtype)
-    ) # Replace all the ones with 0.0 and all the 0's with -infs in the causal mask
-
-    for i in range(prompt_len, total_len):
-        mask[i, :prompt_len] = 0.0 # Allow current index to look back at the original prompt
-        cur = i
-        while cur >= prompt_len:
-            mask[i, cur] = 0.0
-            cur = parent_array[cur] # keep going back using the parent array
+    # Every query can see the already-cached comitted prefix
+    if past_len > 0:
+        # [All batches, all heads, all queries, keys from 0 to past_len]
+        mask[:, :, :, :past_len] = 0.0 # allow to attend all previously commited tokens in KV cache
     
-    return mask.unsqueeze(0).unsqueeze(0)
+    # The pending token can see itself.
+    mask[0, 0, 0, past_len] = 0.0
+
+    # Every tree node can see the pending token and only its own ancestor path.
+    for node_idx in range(prompt_len, len(parent_array)):
+        query_idx = 1 + (node_idx - prompt_len)
+        mask[0, 0, query_idx, past_len] = 0.0
+
+        cur = node_idx
+        while cur >= prompt_len:
+            tree_query_idx = 1 + (cur - prompt_len)
+            mask[0, 0, query_idx, past_len + tree_query_idx] = 0.0
+            cur = parent_array[cur]
+        
+    return mask
 
 # Depth calculation function
 def build_tree_position_ids(parent_array, prompt_len, device):
@@ -125,7 +149,7 @@ def build_children(parent_array, prompt_len):
     return children
 
 # Greedy Decoding
-def greedy_verify_tree(logits, token_tree, parent_array, prompt_len, tokenizer, max_accept_tokens, debug=True):
+def greedy_verify_tree(logits, token_tree, parent_array, prompt_len, tokenizer, max_accept_tokens, logit_offset = 0, debug=True):
     children = build_children(parent_array, prompt_len)
 
     accepted_token_ids = [] # To store accepted tokens
@@ -134,7 +158,7 @@ def greedy_verify_tree(logits, token_tree, parent_array, prompt_len, tokenizer, 
     cur_parent = prompt_len - 1 # start at the end
 
     while len(accepted_token_ids) < max_accept_tokens:
-        target_next = torch.argmax(logits[0, cur_parent, :]).item() # Highest probability acc to parent
+        target_next = torch.argmax(logits[0, cur_parent - logit_offset, :]).item() # Highest probability acc to parent
 
         matching_child = None
         for child_idx in children.get(cur_parent, []):
@@ -176,6 +200,8 @@ def greedy_step(
     device,
     dtype,
     max_accept_tokens,
+    draft_cache,
+    target_cache,
     debug=False,
 ):
     # 1. Build draft tree from the current full sequence
@@ -184,11 +210,13 @@ def greedy_step(
         ssm=ssm,
         k_config=k_config,
         device=device,
+        draft_cache=draft_cache,
     )
-
-    # 2. Pack prompt + speculative tree into one input
+    # 2. The target cache contains all commited tokens except the current final
+    # pending token. Verify pending token + the complete speculative tree
+    past_len = prompt_length - 1
     packed_input_ids = torch.tensor(
-        [token_tree],
+        [token_tree[prompt_length - 1:]],
         device=device,
         dtype=torch.long,
     )
@@ -197,24 +225,27 @@ def greedy_step(
     attention_mask = build_full_tree_attention_mask(
         parent_array=parent_array,
         prompt_len=prompt_length,
+        past_len=past_len,
         device=device,
         dtype=dtype,
     )
 
-    # 4. Build position ids
+    # 4. Reuse existing tree position calculation, keep only pending token and tree positions
+    # that are part of this cached forward
     position_ids = build_tree_position_ids(
         parent_array=parent_array,
         prompt_len=prompt_length,
         device=device,
-    )
+    )[:, prompt_length - 1:]
 
-    # 5. Run target model once over the packed tree
+    # 5. Run target model once over the pending token + packed tree
     with torch.inference_mode():
         outputs = target_model(
             input_ids=packed_input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            use_cache=False,
+            past_key_values=target_cache,
+            use_cache=True,
         )
 
     logits = outputs.logits
@@ -227,12 +258,35 @@ def greedy_step(
         prompt_len=prompt_length,
         tokenizer=tokenizer,
         max_accept_tokens=max_accept_tokens,
+        logit_offset=prompt_length - 1,
         debug=debug,
     )
 
+    # 7. Keep the old cached prefix, the pending token, and only the accepted
+    # tree path. Every rejected speculative branch is discarded.
+    cache_indices = torch.tensor(
+        list(range(past_len))
+        + [past_len]
+        + [
+            past_len + 1 + (node_idx - prompt_length)
+            for node_idx in accepted_nodes
+        ],
+        dtype=torch.long,
+        device=device,
+    )
+
+    updated_target_cache = DynamicCache([
+        (
+            layer.keys.index_select(2, cache_indices),
+            layer.values.index_select(2, cache_indices),
+        )
+        for layer in outputs.past_key_values.layers
+    ])
+
     # Returning token_tree length to calculate total rejections
     total_tree_tokens = len(token_tree) - prompt_length
-    return accepted_tokens, accepted_nodes, total_tree_tokens
+    return accepted_tokens, accepted_nodes, total_tree_tokens, updated_target_cache
+
 
 # Main function that generates the tree 
 def fixed_tree_speculative_generate_greedy(
@@ -252,6 +306,10 @@ def fixed_tree_speculative_generate_greedy(
     generated_ids = input_ids.clone()
     all_new_tokens = []
 
+    # Maintain independent caches for the draft and target
+    target_cache = DynamicCache(config=target_model.config)
+    draft_cache = DynamicCache(config=ssm.config)
+
     iteration = 0
     # Metric tracking variables
     metrics = {
@@ -265,6 +323,21 @@ def fixed_tree_speculative_generate_greedy(
     if device == "cuda": # For latency
         torch.cuda.synchronize()
     start = time.perf_counter()
+
+    # Prefill both caches once with every prompt token except the final pending
+    # token. This forward pass is part of speculative-generation latency.
+    with torch.inference_mode():
+        if input_ids.shape[1] > 1:
+            target_model(
+                input_ids=input_ids[:, :-1],
+                past_key_values=target_cache,
+                use_cache=True,
+            )
+            ssm(
+                input_ids=input_ids[:, :-1],
+                past_key_values=draft_cache,
+                use_cache=True,
+            )
 
     while len(all_new_tokens) < max_new_tokens:
         iteration += 1
@@ -282,7 +355,7 @@ def fixed_tree_speculative_generate_greedy(
             print("Remaining tokens:", remaining_tokens)
             print("Max accept this iteration:", max_accept_this_iter)
 
-        accepted_tokens, accepted_nodes, total_tree_tokens = greedy_step(
+        accepted_tokens, accepted_nodes, total_tree_tokens, target_cache = greedy_step(
             current_input_ids=generated_ids,
             ssm=ssm,
             target_model=target_model,
@@ -291,6 +364,8 @@ def fixed_tree_speculative_generate_greedy(
             device=device,
             dtype=dtype,
             max_accept_tokens=max_accept_this_iter,
+            draft_cache=draft_cache,
+            target_cache=target_cache,
             debug=debug,
         )
 
@@ -301,6 +376,7 @@ def fixed_tree_speculative_generate_greedy(
 
         # Clip just in case
         accepted_tokens = accepted_tokens[:remaining_tokens]
+        accepted_nodes = accepted_nodes[:min(len(accepted_nodes), len(accepted_tokens))]
 
         # Track metric details
         num_accepted_draft = len(accepted_nodes)
@@ -332,6 +408,25 @@ def fixed_tree_speculative_generate_greedy(
             if debug:
                 print("EOS token generated. Stopping.")
             break
+        
+        if len(all_new_tokens) >= max_new_tokens:
+            break
+
+        # The first draft forward already cached the old pending token. Add only
+        # target-accepted draft tokens; the fallback/bonus token remains pending
+        # for the next iteration.
+        if accepted_nodes:
+            accepted_draft_ids = torch.tensor(
+                [accepted_tokens[:len(accepted_nodes)]],
+                device=device,
+                dtype=torch.long,
+            )
+            with torch.inference_mode():
+                ssm(
+                    input_ids=accepted_draft_ids,
+                    past_key_values=draft_cache,
+                    use_cache=True,
+                )
 
     if device == "cuda":
         torch.cuda.synchronize()
