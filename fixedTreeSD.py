@@ -5,26 +5,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, DynamicCache
 from transformers import AttentionInterface, AttentionMaskInterface
 from collections import defaultdict
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-# Load draft model and tokenizer
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-ssm = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B").to(device)
-dtype = torch.float16
-target_model = AutoModelForCausalLM.from_pretrained(
-   "meta-llama/Llama-3.2-3B",
-    torch_dtype = dtype,
-    attn_implementation="sdpa"
-).to(device)
-
-
-
-target_model.eval()
-ssm.eval()
-
-# Configuration
-prompt = "Once upon a time there was a little girl named Alice "
-k_config = [3, 2, 1] # Number of tokens in each branch
 
 # This function builds the draft tree
 def build_draft_tree(prefix_input_ids, ssm, k_config, device, draft_cache):
@@ -87,7 +67,7 @@ def build_draft_tree(prefix_input_ids, ssm, k_config, device, draft_cache):
 
 
 # Attention mask for the tree, since we cannot use normal causal attention
-def build_full_tree_attention_mask(parent_array, prompt_len, past_len, device, dtype=dtype):
+def build_full_tree_attention_mask(parent_array, prompt_len, past_len, device, dtype=torch.float16):
     tree_len = len(parent_array) - prompt_len
     query_len = 1 + tree_len # pending token + flattened draft tree
 
@@ -473,56 +453,77 @@ def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device)
     latency = end - start
     return latency, len(new_tokens), tokenizer.decode(output_ids, skip_special_tokens=True)
 
-max_new_tokens = 500
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-result, spec_result = fixed_tree_speculative_generate_greedy(
-    prompt=prompt,
-    tokenizer=tokenizer,
-    ssm=ssm,
-    target_model=target_model,
-    k_config=k_config,
-    max_new_tokens=max_new_tokens,
-    device=device,
-    dtype=dtype,
-    debug=True,  
-)
+    # Load draft model and tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    ssm = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B").to(device)
+    dtype = torch.float16
+    target_model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-3B",
+        torch_dtype = dtype,
+        attn_implementation="sdpa"
+    ).to(device)
 
-# Normal baseline
-normal_latency, normal_tokens, normal_text = run_normal_baseline(
-    prompt=prompt, tokenizer=tokenizer, target_model=target_model, max_new_tokens=max_new_tokens, device=device
-)
 
-# --- Print Final Metrics Report ---
-print("\n" + "=" * 80)
-print("PERFORMANCE & METRICS REPORT")
-print("=" * 80)
-print("Generated new token ids:", result["new_token_ids"])
-print("Full text:", repr(result["text"]))
-print("=" * 80)
-print("Normal baseline text: ", normal_text )
-print(f"Total Tokens Generated:         {spec_result['num_new_tokens']}")
-print(f"Total Spec Steps (Iterations):  {spec_result['total_iterations']}")
-print(f"Total Draft Tokens Accepted:    {spec_result['total_draft_tokens_accepted']}")
-print(f"Total Target Bonus Tokens:      {spec_result['total_bonus_tokens']}")
-print(f"Total Tree Tokens Rejected:     {spec_result['total_draft_tokens_evaluated'] - spec_result['total_draft_tokens_accepted']}")
 
-# Acceptance Rate Interpretations
-path_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / (spec_result['total_iterations'] * len(k_config))) * 100
-tree_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / spec_result['total_draft_tokens_evaluated']) * 100
+    target_model.eval()
+    ssm.eval()
 
-print(f"Draft Acceptance Rate (Path):   {path_acceptance_rate:.2f}% (Accepted vs max potential path depth)")
-print(f"Draft Acceptance Rate (Tree):   {tree_acceptance_rate:.2f}% (Accepted vs total structural tree nodes generated)")
-print(f"Average Accepted Per Step:      {sum(spec_result['accepted_lengths_per_step']) / spec_result['total_iterations']:.2f} tokens")
+    # Configuration
+    prompt = "Once upon a time there was a little girl named Alice "
+    k_config = [3, 2, 1] # Number of tokens in each branch
+    max_new_tokens = 800
 
-print("-" * 80)
-print("SPEED & LATENCY COMPARISON")
-print("-" * 80)
-spec_throughput = spec_result['num_new_tokens'] / spec_result['latency']
-normal_throughput = normal_tokens / normal_latency
+    result, spec_result = fixed_tree_speculative_generate_greedy(
+        prompt=prompt,
+        tokenizer=tokenizer,
+        ssm=ssm,
+        target_model=target_model,
+        k_config=k_config,
+        max_new_tokens=max_new_tokens,
+        device=device,
+        dtype=dtype,
+        debug=True,  
+    )
 
-print(f"Speculative Tree Latency:       {spec_result['latency']:.4f} seconds")
-print(f"Speculative Tree Throughput:    {spec_throughput:.2f} tokens/sec")
-print(f"Normal Target Model Latency:    {normal_latency:.4f} seconds")
-print(f"Normal Target Model Throughput: {normal_throughput:.2f} tokens/sec")
-print(f"Speedup Factor:                 {normal_latency / spec_result['latency']:.2f}x (Values < 1.0x mean slower)")
-print("=" * 80)
+    # Normal baseline
+    normal_latency, normal_tokens, normal_text = run_normal_baseline(
+        prompt=prompt, tokenizer=tokenizer, target_model=target_model, max_new_tokens=max_new_tokens, device=device
+    )
+
+    # --- Print Final Metrics Report ---
+    print("\n" + "=" * 80)
+    print("PERFORMANCE & METRICS REPORT")
+    print("=" * 80)
+    print("Generated new token ids:", result["new_token_ids"])
+    print("Full text:", repr(result["text"]))
+    print("=" * 80)
+    print("Normal baseline text: ", normal_text )
+    print(f"Total Tokens Generated:         {spec_result['num_new_tokens']}")
+    print(f"Total Spec Steps (Iterations):  {spec_result['total_iterations']}")
+    print(f"Total Draft Tokens Accepted:    {spec_result['total_draft_tokens_accepted']}")
+    print(f"Total Target Bonus Tokens:      {spec_result['total_bonus_tokens']}")
+    print(f"Total Tree Tokens Rejected:     {spec_result['total_draft_tokens_evaluated'] - spec_result['total_draft_tokens_accepted']}")
+
+    # Acceptance Rate Interpretations
+    path_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / (spec_result['total_iterations'] * len(k_config))) * 100
+    tree_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / spec_result['total_draft_tokens_evaluated']) * 100
+
+    print(f"Draft Acceptance Rate (Path):   {path_acceptance_rate:.2f}% (Accepted vs max potential path depth)")
+    print(f"Draft Acceptance Rate (Tree):   {tree_acceptance_rate:.2f}% (Accepted vs total structural tree nodes generated)")
+    print(f"Average Accepted Per Step:      {sum(spec_result['accepted_lengths_per_step']) / spec_result['total_iterations']:.2f} tokens")
+
+    print("-" * 80)
+    print("SPEED & LATENCY COMPARISON")
+    print("-" * 80)
+    spec_throughput = spec_result['num_new_tokens'] / spec_result['latency']
+    normal_throughput = normal_tokens / normal_latency
+
+    print(f"Speculative Tree Latency:       {spec_result['latency']:.4f} seconds")
+    print(f"Speculative Tree Throughput:    {spec_throughput:.2f} tokens/sec")
+    print(f"Normal Target Model Latency:    {normal_latency:.4f} seconds")
+    print(f"Normal Target Model Throughput: {normal_throughput:.2f} tokens/sec")
+    print(f"Speedup Factor:                 {normal_latency / spec_result['latency']:.2f}x (Values < 1.0x mean slower)")
+    print("=" * 80)

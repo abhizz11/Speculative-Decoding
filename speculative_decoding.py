@@ -3,19 +3,6 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed
 import time
 
-# Set Seed
-set_seed(42)
-
-# Check if GPU is available
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(device)
-
-small_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-small_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B").to(device)
-
-large_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
-large_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B").to(device)
-
 def normal_inference(model, tokenizer, prompt, max_new_tokens=30):
     inputs = tokenizer(prompt, return_tensors='pt').to(device)
     outputs = model.generate(inputs['input_ids'], max_new_tokens=max_new_tokens, attention_mask=inputs["attention_mask"],  pad_token_id=tokenizer.eos_token_id, return_dict_in_generate=True, output_scores=True, temperature=0.8, top_p=0.9)
@@ -158,7 +145,7 @@ def speculative_decoding_inference(large_model, small_model, tokenizer, prompt, 
     final_text = " ".join(final_text.split())
     acceptance_rate = accepted_tokens / total_draft_tokens if total_draft_tokens > 0 else 0
 
-    return final_text, accepted_tokens, total_draft_tokens, acceptance_rate
+    return final_text, accepted_tokens, total_draft_tokens, acceptance_rate, final_ids.shape[0] - prompt_len # Generated count
 
 # ==========================================
 # Execution and Measurement
@@ -182,32 +169,64 @@ def measure_latency(func, *args, **kwargs):
     return latency, result
 
 
-prompt = "Once upon a time, there was a little girl named Alice who lived in a small village. The village was nestled in a lush valley surrounded by towering, snow-capped mountains. Every morning, Alice would wander into the nearby woods to collect wildflowers and listen to the birds sing. She was known by all her neighbors for her boundless curiosity and bright, infectious smile. Despite the quiet nature of her home, Alice secretly dreamed of embarking on a grand adventure beyond the horizon."
-max_new_tokens = 50
+if __name__ == "__main__":
+    # Set Seed
+    set_seed(42)
 
-# Measure Normal Inference
-normal_latency, normal_outputs = measure_latency(
-    normal_inference, 
-    large_model, 
-    large_tokenizer, 
-    prompt, 
-    max_new_tokens
-)
+    # Check if GPU is available
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(device)
 
-# Measure Speculative Decoding
-sd_latency, sd_outputs = measure_latency(
-    speculative_decoding_inference, 
-    large_model, 
-    small_model, 
-    small_tokenizer, 
-    prompt, 
-    device, 
-    max_new_tokens, 
-    gamma=1
-)
+    small_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+    small_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B").to(device)
 
-print("-" * 50)
-print(f"Normal Inference Latency: {normal_latency:.4f} seconds")
-print(f"Speculative Decoding Latency: {sd_latency:.4f} seconds")
-print(f"Speedup: {normal_latency / sd_latency:.2f}x")
-print("-" * 50)
+    large_tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
+    large_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B").to(device)
+
+    prompt = "Once upon a time, there was a little girl named Alice who lived in a small village. The village was nestled in a lush valley surrounded by towering, snow-capped mountains. Every morning, Alice would wander into the nearby woods to collect wildflowers and listen to the birds sing. She was known by all her neighbors for her boundless curiosity and bright, infectious smile. Despite the quiet nature of her home, Alice secretly dreamed of embarking on a grand adventure beyond the horizon."
+    max_new_tokens = 50
+
+    # Measure Normal Inference
+    normal_latency, normal_outputs = measure_latency(
+        normal_inference, 
+        large_model, 
+        large_tokenizer, 
+        prompt, 
+        max_new_tokens
+    )
+
+    normal_generated_tokens = len(normal_outputs[1])
+    normal_throughput = normal_generated_tokens / normal_latency
+
+    # Measure Speculative Decoding
+    sd_latency, sd_outputs = measure_latency(
+        speculative_decoding_inference, 
+        large_model, 
+        small_model, 
+        small_tokenizer, 
+        prompt, 
+        device, 
+        max_new_tokens, 
+        gamma=3
+    )
+
+    sd_generated_tokens = sd_outputs[4]
+    sd_throughput = sd_generated_tokens / sd_latency
+
+    # Peak GPU Memory Metrics
+    if device == "cuda":
+        peak_allocated_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+        peak_reserved_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
+    else:
+        peak_allocated_gb = 0.0
+        peak_reserved_gb = 0.0
+
+    print("-" * 50)
+    print(f"Normal Inference Latency: {normal_latency:.4f} seconds")
+    print(f"Speculative Decoding Latency: {sd_latency:.4f} seconds")
+    print(f"Speedup: {normal_latency / sd_latency:.2f}x")
+    print("-" * 50)
+    if device == "cuda":
+        print(f"Peak GPU Memory Allocated:     {peak_allocated_gb:.2f} GB")
+        print(f"Peak GPU Memory Reserved:      {peak_reserved_gb:.2f} GB")
+        print("-" * 50)
