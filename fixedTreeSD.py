@@ -58,8 +58,8 @@ def build_draft_tree(
         cache_mapping = []
         finalized_token_ids = []
 
-        for row, parent_idx in enumerate(active_nodes):
-            ssm_dists_by_parent[parent_idx] = next_token_probs[row].detach()
+        # for row, parent_idx in enumerate(active_nodes):
+        #     ssm_dists_by_parent[parent_idx] = next_token_probs[row].detach()
 
         if depth == 0:
             # Robust Tree Initialization: always seed the root with five branches.
@@ -558,7 +558,8 @@ def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device)
             input_ids, 
             max_new_tokens=max_new_tokens, 
             do_sample=False, # Greedy matching baseline
-            use_cache=True
+            use_cache=True,
+            pad_token_id=target_model.config.pad_token_id or tokenizer.eos_token_id
         )
         
     if device == "cuda":
