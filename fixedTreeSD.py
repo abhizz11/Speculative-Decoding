@@ -266,12 +266,15 @@ def greedy_verify_tree(logits, token_tree, parent_array, prompt_len, tokenizer, 
 
         accepted_token_ids.append(target_next) # Add next nodes
         accepted_node_ids.append(matching_child)
+        
+        if target_next == tokenizer.eos_token_id:
+            break
 
         if debug:
             print("\nACCEPT")
             print("Token:", repr(tokenizer.decode([target_next])))
             print("Node:", matching_child)
-
+        
         cur_parent = matching_child
 
     return accepted_token_ids, accepted_node_ids
@@ -410,7 +413,7 @@ def fixed_tree_speculative_generate_greedy(
         "total_draft_tokens_evaluated": 0,
         "total_draft_tokens_accepted": 0,
         "total_bonus_tokens": 0,
-        "accepted_lengths_per_step": [],
+        # "accepted_lengths_per_step": [],
         "total_iterations": 0
     }
 
@@ -481,7 +484,7 @@ def fixed_tree_speculative_generate_greedy(
         metrics["total_draft_tokens_evaluated"] += total_tree_tokens
         metrics["total_draft_tokens_accepted"] += num_accepted_draft
         metrics["total_bonus_tokens"] += num_bonus
-        metrics["accepted_lengths_per_step"].append(num_accepted_draft)
+        # metrics["accepted_lengths_per_step"].append(num_accepted_draft)
 
         # Append accepted tokens to sequence
         new_token_tensor = torch.tensor(
@@ -533,7 +536,6 @@ def fixed_tree_speculative_generate_greedy(
     metrics["latency"] = end - start
     metrics["num_new_tokens"] = len(all_new_tokens)
     metrics["text"] = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-    metrics["new_text"] = tokenizer.decode(all_new_tokens, skip_special_tokens=True)
 
 
     return {
@@ -559,7 +561,8 @@ def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device)
             max_new_tokens=max_new_tokens, 
             do_sample=False, # Greedy matching baseline
             use_cache=True,
-            pad_token_id=target_model.config.pad_token_id or tokenizer.eos_token_id
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=target_model.generation_config.eos_token_id,
         )
         
     if device == "cuda":
@@ -633,14 +636,6 @@ if __name__ == "__main__":
         print(f"Total Draft Tokens Accepted:    {spec_result['total_draft_tokens_accepted']}")
         print(f"Total Target Bonus Tokens:      {spec_result['total_bonus_tokens']}")
         print(f"Total Tree Tokens Rejected:     {spec_result['total_draft_tokens_evaluated'] - spec_result['total_draft_tokens_accepted']}")
-
-        # Acceptance Rate Interpretations
-        path_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / (spec_result['total_iterations'] * budget)) * 100
-        tree_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / spec_result['total_draft_tokens_evaluated']) * 100
-
-        print(f"Draft Acceptance Rate (Path):   {path_acceptance_rate:.2f}% (Accepted vs global node-budget upper bound)")
-        print(f"Draft Acceptance Rate (Tree):   {tree_acceptance_rate:.2f}% (Accepted vs total structural tree nodes generated)")
-        print(f"Average Accepted Per Step:      {sum(spec_result['accepted_lengths_per_step']) / spec_result['total_iterations']:.2f} tokens")
 
         print("-" * 80)
         print("SPEED & LATENCY COMPARISON")

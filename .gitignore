@@ -7,7 +7,6 @@ venv/
 __pycache__/
 .cache/
 .ipynb_checkpoints/
-benchmark_results/
 
 # Secrets
 .env
@@ -17,4 +16,13 @@ tree.py
 .ipynb_checkpoints/fixedTreeSD-checkpoint.ipynb
 SpecInfer.ipynb
 speculative_tree.py
-
+output.txt
+combined_speculative_decoding_dataset.jsonl
+run.log
+run_train.log
+errors.log
+errors_train.log
+results_train.jsonl
+results.jsonl
+mini.py
+combine_dataset.py
