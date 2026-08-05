@@ -5,177 +5,74 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, DynamicCache
 from transformers import AttentionInterface, AttentionMaskInterface
 from collections import defaultdict
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+dtype = torch.float16
+
+# Calculates the total size of passed tensors in kilobytes.
+def get_transfer_size_kb(*tensors):
+    return sum(t.nelement() * t.element_size() for t in tensors if t is not None) / 1024
 
 # This function builds the draft tree
-# TALON uses a fixed global node budget rather than a fixed width/depth config.
-def build_draft_tree(
-    prefix_input_ids,
-    ssm,
-    budget,
-    device,
-    draft_cache,
-    mu=0.03,
-    max_k=16,
-):
-    if budget < 5:
-        raise ValueError("budget must be at least 5 for TALON robust tree initialization")
-    if not 0.0 < mu <= 1.0:
-        raise ValueError("mu must be in the interval (0, 1]")
-    if max_k < 1:
-        raise ValueError("max_k must be at least 1")
-
+def build_draft_tree(prefix_input_ids, ssm, k_config, device, draft_cache):
     prompt_len = prefix_input_ids.shape[1]
 
     token_tree = prefix_input_ids[0].tolist()
     parent_array = [-1] + list(range(prompt_len - 1)) # -1 is the root and all other tokens follow a chain
 
-    # Preserve the existing public probability array as local token probabilities.
+    # For prompt tokens
     probs_array = [1.0] * prompt_len # Prompts have a probability of one
-
-    # TALON gates on cumulative path probability, so keep that score separately.
-    path_probs_array = [1.0] * prompt_len
-
     frontier_cache = draft_cache # Pre-cached tokens up until the last one
     frontier_tokens = prefix_input_ids[:, -1:] # Final token awaiting to be processed
+
 
     active_nodes = [prompt_len - 1] # Current active nodes we work on
 
     ssm_dists_by_parent = {} # Not used for now but stores distributions
 
-    depth = 0
-    while (len(token_tree) - prompt_len) < budget:
+    for depth, k in enumerate(k_config):
         with torch.inference_mode():
             outputs = ssm(
-                input_ids=frontier_tokens,
-                past_key_values=frontier_cache,
-                use_cache=True,
+                input_ids = frontier_tokens,
+                past_key_values = frontier_cache,
+                use_cache = True,
             )
-
-        next_token_logits = outputs.logits[:, -1, :]
-        next_token_probs = F.softmax(next_token_logits.float(), dim=-1)
+        
+        next_token_logits = outputs.logits[:, -1, :] # The next token is in the last row
+        next_token_probs = F.softmax(next_token_logits.float(), dim=-1) # Probabilities for later
+        top_k_probs, top_k_indices = torch.topk(next_token_probs, k, dim=-1) # Extract top k tokens acc to the config
 
         next_active_nodes = []
-        cache_mapping = []
-        finalized_token_ids = []
+        for row, parent_idx in enumerate(active_nodes):
+            ssm_dists_by_parent[parent_idx] = next_token_probs[row].detach()
 
-        # for row, parent_idx in enumerate(active_nodes):
-        #     ssm_dists_by_parent[parent_idx] = next_token_probs[row].detach()
-
-        if depth == 0:
-            # Robust Tree Initialization: always seed the root with five branches.
-            if next_token_probs.shape[-1] < 5:
-                raise ValueError("draft model vocabulary must contain at least 5 tokens")
-
-            top_k_probs, top_k_indices = torch.topk(
-                next_token_probs,
-                k=5,
-                dim=-1,
-            )
-
-            root_parent_idx = active_nodes[0]
-            for prob, token_id in zip(top_k_probs[0], top_k_indices[0]):
+            for prob, token_id in zip(top_k_probs[row], top_k_indices[row]):
                 token_val = token_id.item()
                 prob_val = prob.item()
 
-                token_tree.append(token_val)
-                parent_array.append(root_parent_idx)
-                probs_array.append(prob_val)
-                path_probs_array.append(prob_val)
+                token_tree.append(token_val) # Contains all the tokens
+                parent_array.append(parent_idx) # Parent for attention mask
 
+                probs_array.append(prob_val) # Probability array
                 new_node_idx = len(token_tree) - 1
+
                 next_active_nodes.append(new_node_idx)
-                finalized_token_ids.append(token_val)
-
-                # Every initialized branch comes from frontier row 0.
-                cache_mapping.append(0)
-        else:
-            candidate_k = min(max_k, next_token_probs.shape[-1])
-            top_k_probs, top_k_indices = torch.topk(
-                next_token_probs,
-                k=candidate_k,
-                dim=-1,
-            )
-
-            # Each tuple stores:
-            # (cumulative path probability, token id, parent node, frontier row,
-            #  local token probability).
-            candidate_pool = []
-            for frontier_row_idx, parent_idx in enumerate(active_nodes):
-                parent_path_prob = path_probs_array[parent_idx]
-                for prob, token_id in zip(
-                    top_k_probs[frontier_row_idx],
-                    top_k_indices[frontier_row_idx],
-                ):
-                    token_prob = prob.item()
-                    path_prob = parent_path_prob * token_prob
-                    candidate_pool.append(
-                        (
-                            path_prob,
-                            token_id.item(),
-                            parent_idx,
-                            frontier_row_idx,
-                            token_prob,
-                        )
-                    )
-
-            anchor = max(candidate[0] for candidate in candidate_pool)
-            threshold = mu * anchor
-            surviving_candidates = [
-                candidate
-                for candidate in candidate_pool
-                if candidate[0] >= threshold
-            ]
-
-            # Enforce the exact global node budget before modifying the tree.
-            remaining_slots = budget - (len(token_tree) - prompt_len)
-            if len(surviving_candidates) > remaining_slots:
-                surviving_candidates.sort(key=lambda candidate: candidate[0], reverse=True)
-                surviving_candidates = surviving_candidates[:remaining_slots]
-
-            for (
-                path_prob,
-                token_val,
-                parent_idx,
-                frontier_row_idx,
-                token_prob,
-            ) in surviving_candidates:
-                token_tree.append(token_val)
-                parent_array.append(parent_idx)
-                probs_array.append(token_prob)
-                path_probs_array.append(path_prob)
-
-                new_node_idx = len(token_tree) - 1
-                next_active_nodes.append(new_node_idx)
-                finalized_token_ids.append(token_val)
-                cache_mapping.append(frontier_row_idx)
-
-        # Route each selected child to the exact parent history that produced it.
-        cache_mapping_tensor = torch.tensor(
-            cache_mapping,
-            dtype=torch.long,
-            device=device,
-        )
-        frontier_cache = DynamicCache([
-            (
-                layer.keys.index_select(0, cache_mapping_tensor),
-                layer.values.index_select(0, cache_mapping_tensor),
-            )
-            for layer in outputs.past_key_values.layers
-        ])
-
-        frontier_tokens = torch.tensor(
-            finalized_token_ids,
-            dtype=torch.long,
-            device=device,
-        ).unsqueeze(1)
-        active_nodes = next_active_nodes
-        depth += 1
-
+        
+        # Each branch needs its own copy of the KV state before the next depth. 
+        if depth < len(k_config) - 1:
+            frontier_cache = DynamicCache([
+                (
+                    layer.keys.repeat_interleave(k, dim=0),
+                    layer.values.repeat_interleave(k, dim=0),
+                )
+                for layer in outputs.past_key_values.layers
+            ])
+            frontier_tokens = top_k_indices.reshape(-1, 1)
+            active_nodes = next_active_nodes
+    
     return token_tree, parent_array, probs_array, prompt_len, ssm_dists_by_parent
 
-
 # Attention mask for the tree, since we cannot use normal causal attention
-def build_full_tree_attention_mask(parent_array, prompt_len, past_len, device, dtype=torch.float16):
+def build_full_tree_attention_mask(parent_array, prompt_len, past_len, device, dtype=dtype):
     tree_len = len(parent_array) - prompt_len
     query_len = 1 + tree_len # pending token + flattened draft tree
 
@@ -266,19 +163,15 @@ def greedy_verify_tree(logits, token_tree, parent_array, prompt_len, tokenizer, 
 
         accepted_token_ids.append(target_next) # Add next nodes
         accepted_node_ids.append(matching_child)
-        
-        if target_next == tokenizer.eos_token_id:
-            break
 
         if debug:
             print("\nACCEPT")
             print("Token:", repr(tokenizer.decode([target_next])))
             print("Node:", matching_child)
-        
+
         cur_parent = matching_child
 
     return accepted_token_ids, accepted_node_ids
-
 
 
 # Greedy Iteration
@@ -287,23 +180,19 @@ def greedy_step(
     ssm,
     target_model,
     tokenizer,
-    budget,
+    k_config,
     device,
     dtype,
     max_accept_tokens,
     draft_cache,
     target_cache,
-    mu=0.03,
-    max_k=16,
     debug=False,
 ):
     # 1. Build draft tree from the current full sequence
     token_tree, parent_array, probs_array, prompt_length, ssm_dists_by_parent = build_draft_tree(
         prefix_input_ids=current_input_ids,
         ssm=ssm,
-        budget=budget,
-        mu=mu,
-        max_k=max_k,
+        k_config=k_config,
         device=device,
         draft_cache=draft_cache,
     )
@@ -332,6 +221,9 @@ def greedy_step(
         prompt_len=prompt_length,
         device=device,
     )[:, prompt_length - 1:]
+
+
+    transfer_kb = get_transfer_size_kb(packed_input_ids, attention_mask, position_ids)
 
     # 5. Run target model once over the pending token + packed tree
     with torch.inference_mode():
@@ -378,22 +270,20 @@ def greedy_step(
         for layer in outputs.past_key_values.layers
     ])
 
+
     # Returning token_tree length to calculate total rejections
     total_tree_tokens = len(token_tree) - prompt_length
-    return accepted_tokens, accepted_nodes, total_tree_tokens, updated_target_cache
-
-
+    return accepted_tokens, accepted_nodes, total_tree_tokens, updated_target_cache, transfer_kb
+    
 # Main function that generates the tree 
 def fixed_tree_speculative_generate_greedy(
     prompt,
     tokenizer,
     ssm,
     target_model,
-    budget,
+    k_config,
     max_new_tokens,
     device,
-    mu=0.03,
-    max_k=16,
     dtype=torch.float16,
     debug=False,
 ):
@@ -413,8 +303,9 @@ def fixed_tree_speculative_generate_greedy(
         "total_draft_tokens_evaluated": 0,
         "total_draft_tokens_accepted": 0,
         "total_bonus_tokens": 0,
-        # "accepted_lengths_per_step": [],
-        "total_iterations": 0
+        "accepted_lengths_per_step": [],
+        "total_iterations": 0,
+        "total_transfer_kb": 0.0 
     }
 
     if device == "cuda": # For latency
@@ -441,9 +332,9 @@ def fixed_tree_speculative_generate_greedy(
 
         remaining_tokens = max_new_tokens - len(all_new_tokens)
 
-        # A path can contain at most one node per budget slot.
+        # len(k_config) is tree depth.
         # +1 allows the final target fallback/bonus token after the deepest accepted node.
-        max_accept_this_iter = min(budget + 1, remaining_tokens)
+        max_accept_this_iter = min(len(k_config) + 1, remaining_tokens)
 
         if debug:
             print("\n" + "=" * 80)
@@ -452,14 +343,12 @@ def fixed_tree_speculative_generate_greedy(
             print("Remaining tokens:", remaining_tokens)
             print("Max accept this iteration:", max_accept_this_iter)
 
-        accepted_tokens, accepted_nodes, total_tree_tokens, target_cache = greedy_step(
+        accepted_tokens, accepted_nodes, total_tree_tokens, target_cache, transfer_kb = greedy_step(
             current_input_ids=generated_ids,
             ssm=ssm,
             target_model=target_model,
             tokenizer=tokenizer,
-            budget=budget,
-            mu=mu,
-            max_k=max_k,
+            k_config=k_config,
             device=device,
             dtype=dtype,
             max_accept_tokens=max_accept_this_iter,
@@ -477,6 +366,7 @@ def fixed_tree_speculative_generate_greedy(
         accepted_tokens = accepted_tokens[:remaining_tokens]
         accepted_nodes = accepted_nodes[:min(len(accepted_nodes), len(accepted_tokens))]
 
+
         # Track metric details
         num_accepted_draft = len(accepted_nodes)
         num_bonus = len(accepted_tokens) - num_accepted_draft
@@ -484,7 +374,8 @@ def fixed_tree_speculative_generate_greedy(
         metrics["total_draft_tokens_evaluated"] += total_tree_tokens
         metrics["total_draft_tokens_accepted"] += num_accepted_draft
         metrics["total_bonus_tokens"] += num_bonus
-        # metrics["accepted_lengths_per_step"].append(num_accepted_draft)
+        metrics["accepted_lengths_per_step"].append(num_accepted_draft)
+        metrics["total_transfer_kb"] += transfer_kb
 
         # Append accepted tokens to sequence
         new_token_tensor = torch.tensor(
@@ -510,7 +401,7 @@ def fixed_tree_speculative_generate_greedy(
         
         if len(all_new_tokens) >= max_new_tokens:
             break
-
+        
         # The first draft forward already cached the old pending token. Add only
         # target-accepted draft tokens; the fallback/bonus token remains pending
         # for the next iteration.
@@ -531,11 +422,16 @@ def fixed_tree_speculative_generate_greedy(
         torch.cuda.synchronize()
     end = time.perf_counter()
 
+    if device == "cuda":
+        torch.cuda.synchronize()
+    end = time.perf_counter()
+
     final_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
     metrics["total_iterations"] = iteration
     metrics["latency"] = end - start
     metrics["num_new_tokens"] = len(all_new_tokens)
     metrics["text"] = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+    metrics["avg_transfer_kb_per_step"] = metrics["total_transfer_kb"] / iteration
 
 
     return {
@@ -545,7 +441,8 @@ def fixed_tree_speculative_generate_greedy(
         "new_text": tokenizer.decode(all_new_tokens, skip_special_tokens=True),
         "latency": end - start,
         "num_new_tokens": len(all_new_tokens),
-    }, metrics, generated_ids
+        "final_text": final_text,
+    }, metrics
 
 # Comparison against normal generation
 def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device):
@@ -560,9 +457,7 @@ def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device)
             input_ids, 
             max_new_tokens=max_new_tokens, 
             do_sample=False, # Greedy matching baseline
-            use_cache=True,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=target_model.generation_config.eos_token_id,
+            use_cache=True
         )
         
     if device == "cuda":
@@ -571,89 +466,81 @@ def run_normal_baseline(prompt, tokenizer, target_model, max_new_tokens, device)
     
     new_tokens = output_ids[0, input_ids.shape[1]:].tolist()
     latency = end - start
-    return latency, len(new_tokens), tokenizer.decode(output_ids, skip_special_tokens=True), output_ids
+    return latency, len(new_tokens), tokenizer.decode(output_ids, skip_special_tokens=True)
 
 if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
     # Load draft model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     ssm = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B").to(device)
-    dtype = torch.float16
     target_model = AutoModelForCausalLM.from_pretrained(
-       "meta-llama/Llama-3.2-3B",
+        "meta-llama/Llama-3.2-3B",
         torch_dtype = dtype,
         attn_implementation="sdpa"
     ).to(device)
-    best_iteration = 0
-    best_speedup = 0
-    tree_tensor = None
-    n_tensor = None
 
 
 
     target_model.eval()
     ssm.eval()
+    # Configuration
+    prompt = "Once upon a time there was a little girl named Alice "
+    k_config = [1, 2, 2] # Number of tokens in each branch
 
-    for n in range(5, 20):
-        # Configuration
-        prompt = "Once upon a time there was a little girl named Alice "
-        budget = n # Exact number of speculative tree nodes per iteration
-        mu = 0.02 # TALON confidence-gating threshold multiplier
-        max_k = 16 # Maximum candidates considered per active parent after depth 0
-        max_new_tokens = 150
+    max_new_tokens = 100
 
-        result, spec_result, spec_tensor = fixed_tree_speculative_generate_greedy(
-            prompt=prompt,
-            tokenizer=tokenizer,
-            ssm=ssm,
-            target_model=target_model,
-            budget=budget,
-            mu=mu,
-            max_k=max_k,
-            max_new_tokens=max_new_tokens,
-            device=device,
-            dtype=dtype,
-            debug=False,  
-        )
+    result, spec_result = fixed_tree_speculative_generate_greedy(
+        prompt=prompt,
+        tokenizer=tokenizer,
+        ssm=ssm,
+        target_model=target_model,
+        k_config=k_config,
+        max_new_tokens=max_new_tokens,
+        device=device,
+        dtype=dtype,
+        debug=False,  
+    )
 
-        # Normal baseline
-        normal_latency, normal_tokens, normal_text, normal_tensor = run_normal_baseline(
-            prompt=prompt, tokenizer=tokenizer, target_model=target_model, max_new_tokens=max_new_tokens, device=device
-        )
+    # Normal baseline
+    normal_latency, normal_tokens, normal_text = run_normal_baseline(
+        prompt=prompt, tokenizer=tokenizer, target_model=target_model, max_new_tokens=max_new_tokens, device=device
+    )
 
-        # --- Print Final Metrics Report ---
-        print("\n" + "=" * 80)
-        print("PERFORMANCE & METRICS REPORT")
-        print(f"{n}th iteration using {n} as the budget")
-        print("=" * 80)
-        # print("Generated new token ids:", result["new_token_ids"])
-        print("Full text:", repr(result["text"]))
-        print("=" * 80)
-        print("Normal baseline text: ", normal_text )
-        print(f"Total Tokens Generated:         {spec_result['num_new_tokens']}")
-        print(f"Total Spec Steps (Iterations):  {spec_result['total_iterations']}")
-        print(f"Total Draft Tokens Accepted:    {spec_result['total_draft_tokens_accepted']}")
-        print(f"Total Target Bonus Tokens:      {spec_result['total_bonus_tokens']}")
-        print(f"Total Tree Tokens Rejected:     {spec_result['total_draft_tokens_evaluated'] - spec_result['total_draft_tokens_accepted']}")
+    # --- Print Final Metrics Report ---
+    print("\n" + "=" * 80)
+    print("PERFORMANCE & METRICS REPORT")
+    print("=" * 80)
+    print("Generated new token ids:", result["new_token_ids"])
+    print("Full text:", repr(result["text"]))
+    print("=" * 80)
+    print("Normal baseline text: ", normal_text )
+    print("=" * 80)
+    print(f"Total Tokens Generated:         {spec_result['num_new_tokens']}")
+    print(f"Total Spec Steps (Iterations):  {spec_result['total_iterations']}")
+    print(f"Total Draft Tokens Accepted:    {spec_result['total_draft_tokens_accepted']}")
+    print(f"Total Target Bonus Tokens:      {spec_result['total_bonus_tokens']}")
+    print(f"Total Tree Tokens Rejected:     {spec_result['total_draft_tokens_evaluated'] - spec_result['total_draft_tokens_accepted']}")
+    print(f"Total KB transferred:            {spec_result["total_transfer_kb"]}")
+    print(f"Average KB transferred:          {spec_result["avg_transfer_kb_per_step"]}")
 
-        print("-" * 80)
-        print("SPEED & LATENCY COMPARISON")
-        print("-" * 80)
-        spec_throughput = spec_result['num_new_tokens'] / spec_result['latency']
-        normal_throughput = normal_tokens / normal_latency
 
-        print(f"Speculative Tree Latency:       {spec_result['latency']:.4f} seconds")
-        print(f"Speculative Tree Throughput:    {spec_throughput:.2f} tokens/sec")
-        print(f"Normal Target Model Latency:    {normal_latency:.4f} seconds")
-        print(f"Normal Target Model Throughput: {normal_throughput:.2f} tokens/sec")
-        print(f"Speedup Factor:                 {normal_latency / spec_result['latency']:.2f}x (Values < 1.0x mean slower)")
-        print("=" * 80)
+    # Acceptance Rate Interpretations
+    path_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / (spec_result['total_iterations'] * len(k_config))) * 100
+    tree_acceptance_rate = (spec_result['total_draft_tokens_accepted'] / spec_result['total_draft_tokens_evaluated']) * 100
 
-        if normal_latency / spec_result['latency'] > best_speedup:
-            best_speedup = normal_latency / spec_result['latency']
-            best_iteration = n
-            n_tensor = normal_tensor
-            tree_tensor = spec_tensor
-    
-    print(f"Best speedup {best_speedup} got using {best_iteration} tokens. The two tensors are the same: ", n_tensor == tree_tensor)
+    print(f"Draft Acceptance Rate (Path):   {path_acceptance_rate:.2f}% (Accepted vs max potential path depth)")
+    print(f"Draft Acceptance Rate (Tree):   {tree_acceptance_rate:.2f}% (Accepted vs total structural tree nodes generated)")
+    print(f"Average Accepted Per Step:      {sum(spec_result['accepted_lengths_per_step']) / spec_result['total_iterations']:.2f} tokens")
+
+    print("-" * 80)
+    print("SPEED & LATENCY COMPARISON")
+    print("-" * 80)
+    spec_throughput = spec_result['num_new_tokens'] / spec_result['latency']
+    normal_throughput = normal_tokens / normal_latency
+
+    print(f"Speculative Tree Latency:       {spec_result['latency']:.4f} seconds")
+    print(f"Speculative Tree Throughput:    {spec_throughput:.2f} tokens/sec")
+    print(f"Normal Target Model Latency:    {normal_latency:.4f} seconds")
+    print(f"Normal Target Model Throughput: {normal_throughput:.2f} tokens/sec")
+    print(f"Speedup Factor:                 {normal_latency / spec_result['latency']:.2f}x (Values < 1.0x mean slower)")
+    print(f"Same text: {normal_text == result["final_text"]}")
+    print("=" * 80)

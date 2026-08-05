@@ -1,0 +1,68 @@
+================================================================================
+PERFORMANCE & METRICS REPORT TALON
+================================================================================
+Full text: 'Once upon a time there was a little girl named Alice \xa0who fell down a rabbit hole and found herself in a strange and wonderful world. She met a lot of strange and wonderful characters, including the Mad Hatter, the White Rabbit, the Cheshire Cat, the Queen of Hearts, and the Red Queen. She had many adventures, including a tea party with the Mad Hatter, a race with the Red Queen, and a game of croquet with the Queen of Hearts. She also met a lot of strange and wonderful creatures, including the Jab'
+================================================================================
+Normal baseline text:  ['Once upon a time there was a little girl named Alice \xa0who fell down a rabbit hole and found herself in a strange and wonderful world. She met a lot of strange and wonderful characters, including the Mad Hatter, the White Rabbit, the Cheshire Cat, the Queen of Hearts, and the Red Queen. She had many adventures, including a tea party with the Mad Hatter, a race with the Red Queen, and a game of croquet with the Queen of Hearts. She also met a lot of strange and wonderful creatures, including the Jab']
+Total Tokens Generated:         100
+Total Spec Steps (Iterations):  28
+Total Draft Tokens Accepted:    73
+Total Target Bonus Tokens:      27
+Total Tree Tokens Rejected:     347
+Total KB transferred:            73.46875
+Average KB transferred:          2.6238839285714284
+--------------------------------------------------------------------------------
+SPEED & LATENCY COMPARISON
+--------------------------------------------------------------------------------
+Speculative Tree Latency:       20.3295 seconds
+Speculative Tree Throughput:    4.92 tokens/sec
+Normal Target Model Latency:    20.4550 seconds
+Normal Target Model Throughput: 4.89 tokens/sec
+Speedup Factor:                 1.01x (Values < 1.0x mean slower)
+Same tensors:  True
+================================================================================
+
+
+================================================================================
+PERFORMANCE & METRICS REPORT NORMAL SD
+================================================================================
+Final text Normal SD: Once upon a time, there was a little girl named Alice who was a little voyeuristic. She was a little protagonist who was a little monster. She woke up in the morning and wanted to go to the bathroom. When she got there, she was detained in a room full of baby things. She was locked in a room with a little A-type monster. She asked this monster to take her to the garden. That's how she was able to get her feet wet. Everything was fine
+================================================================================
+--------------------------------------------------
+Normal Inference Latency: 16.5405 seconds
+Final text Normal: Once upon a time, there was a little girl named Alice  who lived in a small town in the middle of nowhere. She was a very shy and timid girl, and she was always afraid of the dark. One day, she was playing in the woods, and she saw a little boy running around in the woods. She ran after him, and he ran after her. She ran after him, and he ran after her. She ran after him, and he ran after her. She ran after him, and he ran after her. She ran after
+Speculative Decoding Latency: 12.0059 seconds
+Speedup: 1.38x
+Total KB transferred Normal Speculative Decoding: 23558.90625
+Average KB Normal Speuclative Decoding: 588.97265625
+Total Tokens Generated: 100
+Sd Tokens Throughput: 8.329210401938639
+Total Draft Tokens Accepted:    50.0
+
+
+================================================================================
+PERFORMANCE & METRICS REPORT FIXED TREE SD
+================================================================================
+Full text: 'Once upon a time there was a little girl named Alice \xa0who fell down a rabbit hole and found herself in a strange and wonderful world. She met a lot of strange and wonderful characters, including the Mad Hatter, the White Rabbit, the Cheshire Cat, the Queen of Hearts, and the Red Queen. She had many adventures, including a tea party with the Mad Hatter, a race with the Red Queen, and a game of croquet with the Queen of Hearts. She also met a lot of strange and wonderful creatures, including the Jab'
+================================================================================
+Normal baseline text:  ['Once upon a time there was a little girl named Alice \xa0who fell down a rabbit hole and found herself in a strange and wonderful world. She met a lot of strange and wonderful characters, including the Mad Hatter, the White Rabbit, the Cheshire Cat, the Queen of Hearts, and the Red Queen. She had many adventures, including a tea party with the Mad Hatter, a race with the Red Queen, and a game of croquet with the Queen of Hearts. She also met a lot of strange and wonderful creatures, including the Jab']
+Total Tokens Generated:         100
+Total Spec Steps (Iterations):  31
+Total Draft Tokens Accepted:    70
+Total Target Bonus Tokens:      30
+Total Tree Tokens Rejected:     147
+Total KB transferred:            37.265625
+Average KB transferred:          1.202116935483871
+Draft Acceptance Rate (Path):   75.27% (Accepted vs max potential path depth)
+Draft Acceptance Rate (Tree):   32.26% (Accepted vs total structural tree nodes generated)
+Average Accepted Per Step:      2.26 tokens
+--------------------------------------------------------------------------------
+SPEED & LATENCY COMPARISON
+--------------------------------------------------------------------------------
+Speculative Tree Latency:       22.0705 seconds
+Speculative Tree Throughput:    4.53 tokens/sec
+Normal Target Model Latency:    19.2453 seconds
+Normal Target Model Throughput: 5.20 tokens/sec
+Speedup Factor:                 0.87x (Values < 1.0x mean slower)
+Same text: True
+================================================================================

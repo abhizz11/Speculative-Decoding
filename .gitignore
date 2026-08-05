@@ -26,3 +26,6 @@ results_train.jsonl
 results.jsonl
 mini.py
 combine_dataset.py
+benchmark_results/logs/errors_combined_3.log
+benchmark_results/results_combine_3_methods.jsonl
+benchmark_results/logs/run_combined_3.log
